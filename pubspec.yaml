@@ -10,6 +10,8 @@ dependencies:
   flutter:
     sdk: flutter
   audioplayers: ^6.7.1
+  file_picker: ^8.0.0      # 🟢 追加：ファイル選択用
+  hive_flutter: ^1.1.0     # 🟢 追加：ローカルストレージ（バイナリ保存用）
 
 dev_dependencies:
   flutter_lints: ^3.0.0
@@ -22,3 +24,4 @@ flutter:
     - assets/audio/cafe.mp3
     - assets/audio/wave.mp3
     - assets/audio/alert.mp3
+    - assets/icon/app_icon.png  # 🟢 ここを追加
