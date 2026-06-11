@@ -25,3 +25,4 @@ flutter:
     - assets/audio/wave.mp3
     - assets/audio/alert.mp3
     - assets/icon/app_icon.png  # 🟢 ここを追加
+    
