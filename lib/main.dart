@@ -648,8 +648,6 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    int displayAttendanceRate = 92 + _attendanceCount;
-    if (displayAttendanceRate > 100) displayAttendanceRate = 100;
 
     int weekday = DateTime.now().weekday; 
     int dayIdx = weekday - 1; 
@@ -659,7 +657,30 @@ class _HomeScreenState extends State<HomeScreen> {
       todayLectures = AppStorage.getTodayLectures(dayIdx);
     }
 
-    final alertLectures = AppStorage.getAlertLectures();
+    // 📋 すべての登録講義から、実質欠席数が多い（やばい）順にソートしたリストを作成
+    List<Map<String, dynamic>> dangerousLectures = [];
+    AppStorage.syllabusMaster.forEach((id, lecture) {
+      int directAbsence = AppStorage.getAbsenceCount(id);
+      int lateness = AppStorage.getLatenessCount(id);
+      int totalAbsence = AppStorage.getCalculatedTotalAbsence(id);
+      
+      // 1回でも欠席または遅刻がある講義を対象として抽出
+      if (totalAbsence > 0 || directAbsence > 0 || lateness > 0) {
+        dangerousLectures.add({
+          'id': id,
+          'title': lecture['title'],
+          'room': lecture['room'],
+          'professor': lecture['professor'],
+          'directAbsence': directAbsence,
+          'lateness': lateness,
+          'totalAbsence': totalAbsence,
+        });
+      }
+    });
+
+    // 🔴 実質欠席数（totalAbsence）が大きい順（降順）に並び替え
+    dangerousLectures.sort((a, b) => (b['totalAbsence'] as int).compareTo(a['totalAbsence'] as int));
+
     final memos = AppStorage.getMemosSortedByPriority(); // 重要度順に並び替えられたメモの取得
 
     final daysJa = ['月', '火', '水', '木', '金', '土', '日'];
@@ -668,39 +689,98 @@ class _HomeScreenState extends State<HomeScreen> {
     return ListView(
       padding: const EdgeInsets.all(16.0),
       children: [
-        Card(
-          color: theme.colorScheme.primaryContainer,
-          elevation: 0,
-          child: Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('現在の出席状況', style: TextStyle(color: theme.colorScheme.onPrimaryContainer, fontSize: 14)),
-                      const SizedBox(height: 4),
-                      Text('総出席率: $displayAttendanceRate%', style: TextStyle(color: theme.colorScheme.onPrimaryContainer, fontSize: 24, fontWeight: FontWeight.bold)),
-                    ],
-                  ),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => _handleAttendance(context),
-                  icon: const Icon(Icons.check_circle_outline),
-                  label: const Text('出席登録', style: TextStyle(fontWeight: FontWeight.bold)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: theme.colorScheme.tertiary,
-                    foregroundColor: Colors.black87,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  ),
-                ),
-              ],
+        // 🚨 1. 講義出欠ステータスセクション（警戒度順に自動ソート）
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text('講義出欠ステータス (警戒度順)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            ElevatedButton.icon(
+              onPressed: () => _handleAttendance(context),
+              icon: const Icon(Icons.check_circle_outline, size: 16),
+              label: const Text('出席登録', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: theme.colorScheme.tertiary,
+                foregroundColor: Colors.black87,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              ),
             ),
-          ),
+          ],
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: 8),
+
+        if (dangerousLectures.isEmpty)
+          Card(
+            color: Colors.green.shade50,
+            elevation: 0,
+            child: const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Center(
+                child: Text(
+                  'すべての講義が皆勤（クリーン）です！この調子を維持しましょう。',
+                  style: TextStyle(color: Colors.green, fontSize: 13, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+          )
+        else
+          ...dangerousLectures.map((lec) {
+            int total = lec['totalAbsence'];
+            
+            // 危険度に応じたカラーリングと状態ラベルの分岐
+            Color cardBg = Colors.grey.shade50;
+            Color borderCol = Colors.grey.shade300;
+            String statusText = '安全';
+            Color textColor = Colors.green.shade700;
+
+            if (total >= 4) {
+              cardBg = Colors.red.shade50;
+              borderCol = Colors.red.shade400;
+              statusText = '単位不可確定';
+              textColor = Colors.red.shade800;
+            } else if (total == 3) {
+              cardBg = Colors.orange.shade50;
+              borderCol = Colors.orange.shade400;
+              statusText = '次で一発アウト';
+              textColor = Colors.orange.shade900;
+            } else if (total == 2) {
+              cardBg = Colors.yellow.shade50;
+              borderCol = Colors.yellow.shade600;
+              statusText = '警戒モード';
+              textColor = Colors.amber.shade900;
+            }
+
+            return Card(
+              color: cardBg,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                side: BorderSide(color: borderCol, width: 1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              child: ListTile(
+                dense: true,
+                title: Text(lec['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                subtitle: Text(
+                  '欠席: ${lec['directAbsence']}回 / 遅刻: ${lec['lateness']}回\n教室: ${lec['room']}',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                trailing: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text('実質欠席: $total回', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: textColor)),
+                    const SizedBox(height: 2),
+                    Text(statusText, style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: textColor)),
+                  ],
+                ),
+                onTap: widget.onNavigateToTimetable, // タップで時間割へジャンプして詳細確認可能
+              ),
+            );
+          }),
+
+        const SizedBox(height: 24),
         
+        // 📅 2. 本日の予定セクション
         Text('本日の予定 - $todayStr', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
 
@@ -724,33 +804,9 @@ class _HomeScreenState extends State<HomeScreen> {
             return _buildTimelineCard(context, lec['periodText'], lec['title'], lec['room'], cellBg, lec['id']);
           }),
 
-        const SizedBox(height: 20),
-        const Text('要警戒タスク ＆ メッセージ', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
+        const SizedBox(height: 24),
         
-        ...alertLectures.map((alert) {
-          int directAbsence = AppStorage.getAbsenceCount(alert['id']);
-          int lateness = AppStorage.getLatenessCount(alert['id']);
-          return Card(
-            color: alert['status'] == '単位不可確定' ? Colors.red.shade50 : Colors.orange.shade50,
-            shape: RoundedRectangleBorder(
-              side: BorderSide(color: alert['status'] == '単位不可確定' ? Colors.red : Colors.orange),
-              borderRadius: BorderRadius.circular(8)
-            ),
-            child: ListTile(
-              leading: const CircleAvatar(backgroundColor: Colors.red, child: Icon(Icons.gpp_bad, color: Colors.white)),
-              title: Text('${alert['title']} (実質欠席: ${alert['totalAbsence']}回)'),
-              subtitle: Text('内訳: 欠席 $directAbsence回 / 遅刻 $lateness回\n${alert['status'] == '単位不可確定' ? "今期の単位取得は不可能です。" : "これ以上の遅刻・欠席は一発で不可になります。"}'),
-              trailing: TextButton(
-                onPressed: widget.onNavigateToTimetable,
-                child: const Text('確認', style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
-            ),
-          );
-        }),
-
-        const SizedBox(height: 20),
-        // 📝 【新規機能】重要度順のメモセクション
+        // 📝 3. マイメモ・タスクセクション（重要度順）
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
@@ -821,7 +877,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ],
     );
   }
-
+  
   Widget _buildTimelineCard(BuildContext context, String time, String title, String room, Color bgColor, String lectureId) {
     int absence = AppStorage.getAbsenceCount(lectureId);
     int lateness = AppStorage.getLatenessCount(lectureId);
