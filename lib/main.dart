@@ -1,10 +1,12 @@
 import 'dart:math' as math;
 import 'dart:ui';
 import 'dart:typed_data'; // 🟢 追加：Uint8List用
+import 'dart:html' as html; // 🟢 追加：Service Worker状態の確認用
 import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart'; // 🟢 追加
 import 'package:hive_flutter/hive_flutter.dart'; // 🟢 追加
+import 'package:wakelock_plus/wakelock_plus.dart'; // 🟢 追加：画面スリープ防止（バックグラウンド実行対策）
 import 'dart:async';
 
 void main() async {
@@ -68,7 +70,7 @@ class SoundStageScreen extends StatefulWidget {
 
 class PresetData {
   final String id;
-  final String name;
+  String name; // 🟡 修正：リネーム対応のためfinalを解除
   final IconData icon;
   final Color themeColor;
   final Map<String, Offset> nodePositions;
@@ -80,6 +82,33 @@ class PresetData {
     required this.themeColor,
     required this.nodePositions,
   });
+
+  bool get isCustom => id.startsWith('custom_');
+
+  // 🟢 追加：Hiveへの保存用（カスタムプリセットのみ永続化する）
+  Map<String, dynamic> toMap() => {
+        'id': id,
+        'name': name,
+        'iconCodePoint': icon.codePoint,
+        'themeColorValue': themeColor.toARGB32(),
+        'positions': nodePositions.map((k, v) => MapEntry(k, [v.dx, v.dy])),
+      };
+
+  static PresetData fromMap(Map map) {
+    final Map posMap = map['positions'] as Map;
+    return PresetData(
+      id: map['id'] as String,
+      name: map['name'] as String,
+      // 🟡 修正：コードポイントからの動的IconData生成はWebのアイコンtree-shakingと
+      // 相性が悪くビルド不能になるため、カスタムプリセット共通の定数アイコンを使用する
+      icon: Icons.bookmark_added_rounded,
+      themeColor: Color(map['themeColorValue'] as int),
+      nodePositions: posMap.map((k, v) {
+        final list = v as List;
+        return MapEntry(k.toString(), Offset((list[0] as num).toDouble(), (list[1] as num).toDouble()));
+      }),
+    );
+  }
 }
 
 class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerProviderStateMixin {
@@ -113,6 +142,11 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
 
   // 🟢 追加：直前のセッションのノード配置を保存・復元するためのキー
   static const String _layoutStateKey = '__layout_state__';
+  // 🟢 追加：カスタムプリセットの永続化キー
+  static const String _customPresetsKey = '__custom_presets__';
+
+  // 🟢 追加：Service Workerが実際に有効か（＝オフラインでも起動できるか）の実測フラグ
+  bool _isOfflineReady = false;
 
   void _startSleepTimer(int minutes) {
     _stopSleepTimer();
@@ -121,7 +155,8 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
       _remainingSeconds = _totalSeconds;
       _isTimerActive = true;
     });
-    _runTick(); 
+    _syncWakelock(); // 🟢 追加
+    _runTick();
   }
 
   void _runTick() {
@@ -147,6 +182,7 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
     } else {
       _countdownTimer?.cancel();
     }
+    _syncWakelock(); // 🟢 追加
   }
 
   void _stopSleepTimer() {
@@ -155,6 +191,7 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
       _isTimerActive = false;
       _remainingSeconds = 0;
     });
+    _syncWakelock(); // 🟢 追加
   }
 
   final List<PresetData> _presets = [
@@ -213,14 +250,42 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
     )..repeat(reverse: true);
 
     _loadUserSounds(); // 🟢 追加：過去に保存されたカスタム音声を先に読み込む
+    _loadCustomPresets(); // 🟢 追加：過去に保存されたカスタムプリセットを読み込む
     _loadSavedLayout(); // 🟢 追加：直前のセッションで配置していたノード位置を復元
     _initAudio();
-    _alarmPlayer = AudioPlayer(); 
-    
+    _alarmPlayer = AudioPlayer();
+    _checkOfflineCapability(); // 🟢 追加：Service Workerによるオフライン起動可否を実測
+
     _fadeTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
       _applyVolumeFade();
-      _checkAlarmRoutine(); 
+      _checkAlarmRoutine();
     });
+  }
+
+  // 🟢 追加：Service Workerが登録・有効化済みかを実際に確認する
+  // （従来は常時グレー表示の固定UIだったため、実態に即した表示に修正）
+  Future<void> _checkOfflineCapability() async {
+    try {
+      final serviceWorker = html.window.navigator.serviceWorker;
+      if (serviceWorker == null) return;
+      await serviceWorker.ready;
+      if (mounted) {
+        setState(() => _isOfflineReady = true);
+      }
+    } catch (e) {
+      debugPrint('Service Worker確認失敗: $e');
+    }
+  }
+
+  // 🟢 追加：再生中、またはアラーム待機中は画面スリープを防止する
+  // （画面ロックでタイマー/アラームが止まってしまう問題への対策）
+  void _syncWakelock() {
+    final bool shouldStayAwake = !_isMuted || _isAlarmEnabled || _isTimerActive;
+    if (shouldStayAwake) {
+      WakelockPlus.enable();
+    } else {
+      WakelockPlus.disable();
+    }
   }
 
   // 🟢 追加：起動時にストレージからカスタム音声を展開しノード化
@@ -398,8 +463,9 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
     await _alarmPlayer?.stop();
     setState(() {
       _isAlarmEnabled = false;
-      _isAlarmRinging = false; 
+      _isAlarmRinging = false;
     });
+    _syncWakelock(); // 🟢 追加
     if (_currentSheetLiveSetter != null) {
       try { _currentSheetLiveSetter!((){}); } catch (_) {}
     }
@@ -448,6 +514,7 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
     setState(() {
       _isMuted = !_isMuted;
     });
+    _syncWakelock(); // 🟢 追加
 
     final screenWidth = MediaQuery.of(context).size.width;
     final maxDistance = screenWidth * _distanceScaleFactor;
@@ -541,14 +608,81 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
                   id: newId,
                   name: controller.text.trim(),
                   icon: Icons.bookmark_added_rounded,
-                  themeColor: const Color(0xFFFFEAA7), 
+                  themeColor: const Color(0xFFFFEAA7),
                   nodePositions: currentPositions,
                 ));
-                _activePresetId = newId; 
+                _activePresetId = newId;
               });
+              _saveCustomPresets(); // 🟢 追加：新規プリセットを永続化
 
-              Navigator.pop(context); 
-              Navigator.pop(context); 
+              Navigator.pop(context);
+              Navigator.pop(context);
+            },
+            child: const Text('保存', style: TextStyle(color: Color(0xFF6C5CE7), fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 🟢 追加：起動時にカスタムプリセットをストレージから復元
+  void _loadCustomPresets() {
+    final List? saved = _audioBox.get(_customPresetsKey) as List?;
+    if (saved == null) return;
+    for (var item in saved) {
+      try {
+        _presets.add(PresetData.fromMap(Map<String, dynamic>.from(item as Map)));
+      } catch (e) {
+        debugPrint('プリセット復元失敗: $e');
+      }
+    }
+  }
+
+  // 🟢 追加：カスタムプリセット一覧をストレージへ永続化（組み込みの3種は対象外）
+  void _saveCustomPresets() {
+    final customPresets = _presets.where((p) => p.isCustom).map((p) => p.toMap()).toList();
+    _audioBox.put(_customPresetsKey, customPresets);
+  }
+
+  // 🟢 追加：カスタムプリセットの削除
+  void _deletePreset(PresetData preset) {
+    setState(() {
+      _presets.removeWhere((p) => p.id == preset.id);
+      if (_activePresetId == preset.id) _activePresetId = '';
+    });
+    _saveCustomPresets();
+  }
+
+  // 🟢 追加：カスタムプリセットのリネーム
+  void _renamePreset(PresetData preset) {
+    final TextEditingController controller = TextEditingController(text: preset.name);
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF161823),
+        title: const Text('プリセット名を変更', style: TextStyle(color: Colors.white, fontSize: 16)),
+        content: TextField(
+          controller: controller,
+          style: const TextStyle(color: Colors.white),
+          decoration: InputDecoration(
+            hintText: 'プリセット名を入力',
+            hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
+            enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('キャンセル', style: TextStyle(color: Colors.white38)),
+          ),
+          TextButton(
+            onPressed: () {
+              if (controller.text.trim().isEmpty) return;
+              setState(() {
+                preset.name = controller.text.trim();
+              });
+              _saveCustomPresets();
+              Navigator.pop(context);
             },
             child: const Text('保存', style: TextStyle(color: Color(0xFF6C5CE7), fontWeight: FontWeight.bold)),
           ),
@@ -565,7 +699,8 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
     for (var node in _nodes) {
       node.player?.dispose();
     }
-    _alarmPlayer?.dispose(); 
+    _alarmPlayer?.dispose();
+    WakelockPlus.disable(); // 🟢 追加
     super.dispose();
   }
 
@@ -1064,10 +1199,17 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
                         },
                         child: _buildPresetCard(
                           preset.name,
-                          preset.id.startsWith('custom_') ? 'カスタム配置' : '焚き火・雨・カフェ・時計',
+                          preset.isCustom ? 'カスタム配置' : '焚き火・雨・カフェ・時計',
                           preset.icon,
                           preset.themeColor,
                           isActive: isActive,
+                          // 🟢 追加：カスタムプリセットのみリネーム・削除操作を許可
+                          onRename: preset.isCustom
+                              ? () => _renamePreset(preset)
+                              : null,
+                          onDelete: preset.isCustom
+                              ? () => setSheetState(() => _deletePreset(preset))
+                              : null,
                         ),
                       );
                     }).toList(),
@@ -1111,7 +1253,15 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
     );
   }
 
-  Widget _buildPresetCard(String title, String subtitle, IconData icon, Color color, {bool isActive = false}) {
+  Widget _buildPresetCard(
+    String title,
+    String subtitle,
+    IconData icon,
+    Color color, {
+    bool isActive = false,
+    VoidCallback? onRename, // 🟢 追加
+    VoidCallback? onDelete, // 🟢 追加
+  }) {
     return AnimatedContainer(
       duration: const Duration(milliseconds: 200),
       margin: const EdgeInsets.symmetric(vertical: 6),
@@ -1172,8 +1322,27 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
               ],
             ),
           ),
-          if (isActive)
+          if (isActive) ...[
             Icon(Icons.check_circle_rounded, color: color, size: 18),
+            const SizedBox(width: 6),
+          ],
+          // 🟢 追加：カスタムプリセットのみリネーム・削除アイコンを表示
+          if (onRename != null)
+            GestureDetector(
+              onTap: onRename,
+              child: Padding(
+                padding: const EdgeInsets.all(4),
+                child: Icon(Icons.edit_rounded, color: Colors.white.withOpacity(0.4), size: 16),
+              ),
+            ),
+          if (onDelete != null)
+            GestureDetector(
+              onTap: onDelete,
+              child: Padding(
+                padding: const EdgeInsets.all(4),
+                child: Icon(Icons.delete_outline_rounded, color: const Color(0xFFFF7675).withOpacity(0.7), size: 16),
+              ),
+            ),
         ],
       ),
     );
@@ -1470,7 +1639,11 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
               children: [
                 _buildStatusIcon(Icons.wifi, 'PWA', const Color(0xFF2ECC71)),
                 const SizedBox(width: 24),
-                _buildStatusIcon(Icons.person_off_rounded, 'オフライン対応', Colors.white24),
+                _buildStatusIcon(
+                  _isOfflineReady ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
+                  'オフライン対応',
+                  _isOfflineReady ? const Color(0xFF2ECC71) : Colors.white24,
+                ),
               ],
             ),
           ],
@@ -1665,6 +1838,7 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
                         if (value) _hasTriggeredAlarmToday = false;
                       });
                       setState(() {});
+                      _syncWakelock(); // 🟢 追加
                     },
                   ),
                 ],
@@ -1724,7 +1898,11 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
               children: [
                 _buildStatusIcon(Icons.wifi, 'PWA', const Color(0xFF2ECC71)),
                 const SizedBox(width: 24),
-                _buildStatusIcon(Icons.person_off_rounded, 'オフライン対応', Colors.white24),
+                _buildStatusIcon(
+                  _isOfflineReady ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
+                  'オフライン対応',
+                  _isOfflineReady ? const Color(0xFF2ECC71) : Colors.white24,
+                ),
               ],
             ),
           ],

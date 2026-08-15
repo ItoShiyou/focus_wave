@@ -12,6 +12,7 @@ dependencies:
   audioplayers: ^6.7.1
   file_picker: ^8.0.0      # 🟢 追加：ファイル選択用
   hive_flutter: ^1.1.0     # 🟢 追加：ローカルストレージ（バイナリ保存用）
+  wakelock_plus: ^1.2.8    # 🟢 追加：再生中/アラーム待機中の画面スリープ防止（バックグラウンド実行対策）
 
 dev_dependencies:
   flutter_lints: ^3.0.0
