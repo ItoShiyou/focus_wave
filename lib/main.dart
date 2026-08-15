@@ -109,7 +109,10 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
   bool _isAlarmRinging = false;         
   
   bool _isMuted = true;
-  String _activePresetId = 'midnight'; 
+  String _activePresetId = 'midnight';
+
+  // 🟢 追加：直前のセッションのノード配置を保存・復元するためのキー
+  static const String _layoutStateKey = '__layout_state__';
 
   void _startSleepTimer(int minutes) {
     _stopSleepTimer();
@@ -210,6 +213,7 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
     )..repeat(reverse: true);
 
     _loadUserSounds(); // 🟢 追加：過去に保存されたカスタム音声を先に読み込む
+    _loadSavedLayout(); // 🟢 追加：直前のセッションで配置していたノード位置を復元
     _initAudio();
     _alarmPlayer = AudioPlayer(); 
     
@@ -243,6 +247,31 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
         ));
       }
     }
+  }
+
+  // 🟢 追加：直前のセッションで保存されたノード配置（位置＝音量・LRパン）を復元
+  void _loadSavedLayout() {
+    final Map? saved = _audioBox.get(_layoutStateKey) as Map?;
+    if (saved == null) return;
+    for (var node in _nodes) {
+      final posData = saved[node.id];
+      if (posData is List && posData.length == 2) {
+        node.position = Offset(
+          (posData[0] as num).toDouble(),
+          (posData[1] as num).toDouble(),
+        );
+      }
+    }
+    _activePresetId = ''; // 復元後は既定プリセットと一致しない状態として扱う
+  }
+
+  // 🟢 追加：現在のノード配置をローカルストレージへ永続化
+  // ドラッグ終了時・プリセット読込時・カスタム音声追加時に呼び出す
+  void _saveCurrentLayout() {
+    final Map<String, List<double>> layout = {
+      for (var node in _nodes) node.id: [node.position.dx, node.position.dy],
+    };
+    _audioBox.put(_layoutStateKey, layout);
   }
 
   // 🟢 追加：ローカルのストレージから音声ファイルを読み込んで追加するメソッド
@@ -287,6 +316,7 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
           _nodes.add(newNode);
           _activePresetId = ''; // プリセット状態を解除
         });
+        _saveCurrentLayout(); // 🟢 追加：新規ノード追加時点の配置を保存
 
         // ミュート中でなければその場で再生開始
         if (!_isMuted) {
@@ -440,12 +470,17 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
   void _updateVolumeWithMaxDistance(SoundNodeData node, Offset localPos, double maxDistance) {
     double distance = math.sqrt(localPos.dx * localPos.dx + localPos.dy * localPos.dy);
     double calculatedVolume = (1.0 - (distance / maxDistance)).clamp(0.0, 1.0);
-    
+
     if (!_isMuted) {
       node.targetVolume = calculatedVolume;
     } else {
       node.targetVolume = 0.0;
     }
+
+    // 🟢 追加：中央からの左右方向のズレを、そのままステレオLRパンに反映する
+    // 左に置けば左耳寄りに、右に置けば右耳寄りに聞こえる
+    final double balance = (localPos.dx / maxDistance).clamp(-1.0, 1.0);
+    node.player?.setBalance(balance);
   }
 
   void _loadPreset(PresetData preset, double maxDistance) async {
@@ -466,6 +501,7 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
         _updateVolumeWithMaxDistance(node, node.position, maxDistance);
       }
     }
+    _saveCurrentLayout(); // 🟢 追加：プリセット読込後の配置を保存
   }
 
   void _saveCurrentAsNewPreset() {
@@ -531,6 +567,70 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
     }
     _alarmPlayer?.dispose(); 
     super.dispose();
+  }
+
+  // 🟢 追加：アプリ情報とTHE BONJINクレジットを表示するシート
+  void _showAboutSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withOpacity(0.4),
+      builder: (context) {
+        return ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF161823).withOpacity(0.9),
+                border: Border(top: BorderSide(color: Colors.white.withOpacity(0.1), width: 1)),
+              ),
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 36,
+                        height: 4,
+                        decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+                      ),
+                      const SizedBox(height: 24),
+                      const Text(
+                        'FocusWave',
+                        style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '環境音ミキサー × スリープタイマー × アラーム',
+                        style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.4)),
+                      ),
+                      const SizedBox(height: 32),
+                      Container(
+                        width: 56,
+                        height: 56,
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Image.asset('assets/branding/bonjin_logo.png', fit: BoxFit.contain),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'produced by THE BONJIN',
+                        style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.4), letterSpacing: 0.5),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   void _showGlassBottomSheet(String title, int initialTabIndex, double maxDistance) {
@@ -699,6 +799,8 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
                     _activePresetId = '';
                   });
                 },
+                // 🟢 追加：ドラッグ終了時点の配置を保存（ドラッグ中は毎フレーム保存しない）
+                onPanEnd: (_) => _saveCurrentLayout(),
                 child: _buildSoundNode(node, maxDistance),
               ),
             );
@@ -713,7 +815,7 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
               children: [
                 IconButton(
                   icon: const Icon(Icons.menu, color: Colors.white70),
-                  onPressed: () {}, 
+                  onPressed: _showAboutSheet, // 🟢 追加：アプリ情報 / THE BONJINクレジット表示
                 ),
                 const Text(
                   'Sound Stage',
@@ -1329,10 +1431,37 @@ class _SoundStageScreenState extends State<SoundStageScreen> with SingleTickerPr
                 label: const Text('タイマーをキャンセル', style: TextStyle(fontWeight: FontWeight.bold)),
               ),
 
-            const SizedBox(height: 30),
-            Text(
-              'バックグラウンド再生対応',
-              style: TextStyle(color: Colors.white.withOpacity(0.2), fontSize: 11),
+            const SizedBox(height: 24),
+            // 🟡 修正：「バックグラウンド再生対応」という誤解を招く表記を撤回し、
+            // アラーム画面と同じ内容の正直な注意書きに統一する
+            // （画面ロック・バックグラウンド移行でタイマーが一時停止する制約は両画面で共通のため）
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFF7675).withOpacity(0.08),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: const Color(0xFFFF7675).withOpacity(0.25),
+                  width: 1,
+                ),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(Icons.warning_amber_rounded, color: Color(0xFFFF7675), size: 18),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '画面をロックしたりバックグラウンドに移行すると、タイマーが一時停止する場合があります。使用中は画面を点灯したままにすることをおすすめします。',
+                      style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 11, height: 1.4),
+                    ),
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 20),
 
